@@ -18,7 +18,7 @@ let zero = Uint128 0
 let hunderd = Uint128 100
 let true = True
 let false = False
-let empty_tag = ""
+let addfunds_tag = "AddFunds"
 
 (****************************************)
 (* Event codes *)
@@ -198,7 +198,7 @@ procedure user_withdraw_pending (address: ByStr20, amount: Uint128)
         total_staked := total;
        
         (* transfer amount to address *)
-        transfer_funds empty_tag amount address;
+        transfer_funds addfunds_tag amount address;
        
         e = {
           _eventname : "withdraw stake success";
@@ -398,9 +398,18 @@ transition admin_drain_balance ()
 
   balance_l <- _balance;
   admin_l <- admin;
-  transfer_funds empty_tag balance_l admin_l;
+  transfer_funds addfunds_tag balance_l admin_l;
   e = {_eventname : "admin drain balance";
        amount: balance_l};
+  event e
+end
+
+(* accept funds from other contracts *)
+transition AddFunds()
+  accept;
+  bal <- _balance;
+  e = {_eventname : "AddFunds";
+       amount: _amount; blance: bal};
   event e
 end
 
@@ -474,7 +483,7 @@ transition withdraw_rewards ()
       users_map[_sender] := new_user;
      
       (* transfer rewards to _sender *)
-      transfer_funds empty_tag rewards _sender;
+      transfer_funds addfunds_tag rewards _sender;
      
       e = {_eventname : "rewards withdraw success";
            result: withdrawRewardsSuccess;
