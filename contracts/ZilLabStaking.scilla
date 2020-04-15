@@ -238,6 +238,11 @@ procedure user_withdraw_staked (address: ByStr20, amount: Uint128)
       staked_remain = builtin sub staked amount;
       new_user = User staked_remain rewards;
       users_map[address] := new_user;
+      
+      (* decrease total staked *)
+      total <- total_staked;
+      total = builtin sub total amount;
+      total_staked := total;
      
       (* add to waiting list *)
       cur_waiting <- waiting_map[address];
@@ -298,6 +303,23 @@ procedure deposit_pending(entry : Pair ByStr20 Uint128)
     end
   end
 end
+
+procedure withdraw_waiting(entry : Pair ByStr20 Uint128)
+  match entry with
+  | Pair address waiting =>
+    (* remove waiting entry *)
+    delete waiting_map[address];
+    
+    is_zero = builtin eq waiting zero;
+    match is_zero with
+    | True => (* do nothing *)
+    | False =>
+      (* transfer waiting amount to user *)
+      transfer_funds addfunds_tag waiting address
+    end
+  end
+end
+
 
 (* Transitions *)
 (****************************************)
@@ -383,12 +405,35 @@ transition admin_deposit_pending_to_ssn ()
   forall pending_list deposit_pending
 end
 
-transition admin_withdraw_from_ssn ()
-  validate_admin
+transition admin_withdraw_from_ssn (amount: Uint128)
+  validate_admin;
+  (* withdraw from SSN contract *)
+  ssn_contract_addr <- ssn_contract;
+  msg = {_tag : "withdraw_stake_amount";
+         _amount : zero; 
+         _recipient : ssn_contract_addr;
+         amount: amount};
+  msgs = one_msg msg;
+  send msgs
+end
+
+transition admin_withdraw_waiting ()
+  validate_admin;
+  (* process withdraw waiting list *)
+  map_l <- waiting_map;
+  waiting_list = builtin to_list map_l;
+  forall waiting_list withdraw_waiting
 end
 
 transition admin_withdraw_rewards_from_ssn ()
-  validate_admin
+  validate_admin;
+  (* withdraw rewards from SSN contract *)
+  ssn_contract_addr <- ssn_contract;
+  msg = {_tag : "withdraw_stake_rewards";
+         _amount : zero; 
+         _recipient : ssn_contract_addr};
+  msgs = one_msg msg;
+  send msgs
 end
 
 transition admin_drain_balance ()
