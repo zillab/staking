@@ -367,8 +367,15 @@ transition admin_unpause()
   event e
 end
 
+transition admin_deposit_to_ssn(amount: Uint128)
+  validate_admin;
+  (* deposit to SSN contract *)
+  tag_deposit = "stake_deposit";
+  ssn_contract_addr <- ssn_contract;
+  transfer_funds tag_deposit amount ssn_contract_addr
+end
 
-transition admin_deposit_to_ssn ()
+transition admin_deposit_pending_to_ssn ()
   validate_admin;
   (* deposit pending list to ssn *)
   map_l <- pending_map;
@@ -384,15 +391,6 @@ transition admin_withdraw_rewards_from_ssn ()
   validate_admin
 end
 
-transition admin_deposit_funds ()
-  validate_admin;
-  accept;
-  bal <- _balance;
-  e = {_eventname : "admin deposit funds";
-       amount: _amount; blance: bal};
-  event e
-end
-
 transition admin_drain_balance ()
   validate_admin;
 
@@ -400,6 +398,7 @@ transition admin_drain_balance ()
   admin_l <- admin;
   transfer_funds addfunds_tag balance_l admin_l;
   e = {_eventname : "admin drain balance";
+       to: admin_l;
        amount: balance_l};
   event e
 end
@@ -407,9 +406,9 @@ end
 (* accept funds from other contracts *)
 transition AddFunds()
   accept;
-  bal <- _balance;
-  e = {_eventname : "AddFunds";
-       amount: _amount; blance: bal};
+  e = {_eventname : "add funds";
+       from: _sender;
+       amount: _amount};
   event e
 end
 
