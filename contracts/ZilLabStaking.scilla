@@ -1,0 +1,519 @@
+(* Copyright (C) 2020 ZilLab.com - All Rights Reserved *)
+scilla_version 0
+
+import BoolUtils ListUtils
+
+(* Library *)
+library ZilLabStaking
+
+(* Types *)    
+(* User - staked_amount, rewards *)
+type User =
+| User of Uint128 Uint128
+
+(****************************************)
+(* Constants *)
+(****************************************)
+let zero = Uint128 0
+let hunderd = Uint128 100
+let true = True
+let false = False
+let empty_tag = ""
+
+(****************************************)
+(* Event codes *)
+(****************************************)
+let success = Uint32 1000
+let stakeDeposited = Uint32 1001
+let withdrawRewardsSuccess = Uint32 1002
+let withdrawStakeSuccess = Uint32 1003
+let withdrawStakeWaiting = Uint32 1004
+
+let error = Uint32 2000
+let userNotExist = Uint32 2001
+let noRewardsToWithdraw = Uint32 2002
+let withdrawZeroAmount = Uint32 2003
+let withdrawNotEnoughPending = Uint32 2004
+let withdrawNotEnoughStaked = Uint32 2005
+
+(****************************************)
+(* Functions *)
+(****************************************)
+let one_msg =
+  fun (m : Message) =>
+    let e = Nil {Message} in
+    Cons {Message} m e
+   
+(********************)
+(* Exceptions *)
+(********************)
+let mk_admin_validation_failed_error =
+  fun (sender : ByStr20) =>
+    { _exception : "Admin validation failed"; sender : sender }
+
+(****************************************)
+(* Events *)
+(****************************************)
+let mk_user_not_exists_event =
+  fun (address : ByStr20) =>
+    { _eventname : "User doesn't exist";
+      result: userNotExist; address : address }
+   
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+contract ZilLabStaking(
+  init_admin : ByStr20,
+  init_ssn_contract: ByStr20
+)
+
+
+(****************************************)
+(* Mutable fields *)
+(****************************************)
+field admin : ByStr20  = init_admin
+field ssn_contract : ByStr20 = init_ssn_contract
+
+field paused: Bool = False
+
+(* default reward percent: 10% *)
+field reward_percent: Uint128 = Uint128 10
+(* default max stake: 100K Zils *)
+field max_stake : Uint128 = Uint128 100000000000000000
+
+(* total staked include the pending amount *)
+field total_staked: Uint128 = zero
+
+(* all users *)
+(* User - staked_amount, rewards *)
+field users_map: Map ByStr20 User = Emp ByStr20 User
+(* pending to depsite to SSN contract *)
+field pending_map: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+(* waiting to withdraw from SSN contract *)
+field waiting_map: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+
+(****************************************)
+(* Procedures *)
+(****************************************)
+(* Can be called by the current contract admin only *)
+procedure validate_admin ()
+  cur_admin <- admin;
+  is_admin = builtin eq cur_admin _sender;
+  match is_admin with
+  | True =>
+  | False =>
+      e = mk_admin_validation_failed_error _sender;
+      throw e
+  end
+end
+
+procedure validate_paused ()
+  paused_l <- paused;
+  match paused_l with
+  | False =>
+  | True =>
+      e = { _exception : "Contract paused" };
+      throw e
+  end
+end
+
+procedure validate_amount (amount: Uint128)
+  invalid = builtin eq zero amount;
+  match invalid with
+  | True =>
+      e = { _exception : "amount must > 0"; amount: amount };
+      throw e
+  | False =>
+  end
+end
+
+procedure validate_user (address: ByStr20)
+  cur_user <- users_map[address];
+  match cur_user with
+  | None =>
+      (* user not exists *)
+      e = { _exception : "user not exists"; address: address};
+      throw e
+  | _ =>
+  end
+end
+
+procedure validate_max_stake(amount: Uint128)
+  total_staked_l <- total_staked;
+  new_total_staked = builtin add total_staked_l amount;
+ 
+  max_stake_l <- max_stake;
+  exceeded = builtin lt max_stake_l new_total_staked;
+  match exceeded with
+  | True =>
+      e = { _exception : "max stake exceeded";
+            max_stake : max_stake_l;
+            new_total_staked: new_total_staked };
+      throw e
+  | False =>
+  end
+end
+
+procedure transfer_funds (tag: String, amount : Uint128, recipient : ByStr20)
+  msg = {_tag : tag; _amount : amount; _recipient : recipient};
+  msgs = one_msg msg;
+  send msgs
+end
+
+procedure user_withdraw_pending (address: ByStr20, amount: Uint128)
+
+  pending <- pending_map[address];
+  match pending with
+    | None =>
+      e = { _exception : "no pending amount"; address: address };
+      throw e
+
+    | Some (pending) =>
+      not_enough = builtin lt pending amount;
+      match not_enough with
+      | True =>
+        (* not enough pending amount *)
+        e = {_eventname : "withdraw not enough pending";
+             result: withdrawNotEnoughPending;
+             user: address;
+             pending: pending;
+             amount: amount};
+        event e
+       
+      | False =>
+        (* decrease user pending amount *)
+        pending_remain = builtin sub pending amount;
+        is_zero = builtin eq pending_remain zero;
+        match is_zero with
+        | True =>
+          delete pending_map[address]
+        | False =>
+          pending_map[address] := pending_remain
+        end;
+       
+        (* decrease total staked *)
+        total <- total_staked;
+        total = builtin sub total amount;
+        total_staked := total;
+       
+        (* transfer amount to address *)
+        transfer_funds empty_tag amount address;
+       
+        e = {
+          _eventname : "withdraw stake success";
+          result: withdrawStakeSuccess;
+          user: address;
+          amount: amount;
+          pending_remain: pending_remain};
+        event e
+      end
+  end
+end
+
+procedure user_withdraw_staked (address: ByStr20, amount: Uint128)
+  cur_user <- users_map[address];
+  match cur_user with
+  | None =>
+    (* user not exists *)
+    e = { _exception : "user not exists"; address: address};
+    throw e
+   
+  | Some (User staked rewards) =>
+    (* check if enough staked to withdraw *)
+    not_enough = builtin lt staked amount;
+    match not_enough with
+    | True =>
+      e = {_eventname : "withdraw not enough staked";
+           result: withdrawNotEnoughStaked;
+           user: address;
+           staked: staked;
+           amount: amount};
+      event e
+     
+    | False =>
+      (* enough amount *)
+     
+      (* update user's stake amount *)
+      staked_remain = builtin sub staked amount;
+      new_user = User staked_remain rewards;
+      users_map[address] := new_user;
+     
+      (* add to waiting list *)
+      cur_waiting <- waiting_map[address];
+      new_waiting = match cur_waiting with
+        | None =>
+          amount
+        | Some (cur_waiting) =>
+          builtin add cur_waiting amount
+      end;
+      waiting_map[address] := new_waiting;
+     
+      e = {_eventname : "withdraw stake waiting";
+           result: withdrawStakeWaiting;
+           user: address;
+           staked: staked_remain;
+           new_waiting: new_waiting;
+           amount: amount};
+      event e
+     
+    end (* match not_enough with *)
+   
+  end (* match cur_user with *)
+ 
+end
+
+
+procedure deposit_pending(entry : Pair ByStr20 Uint128)
+  match entry with
+  | Pair address pending =>
+    (* remove pending entry *)
+    delete pending_map[address];
+   
+    is_zero = builtin eq pending zero;
+    match is_zero with
+    | True => (* do nothing *)
+    | False =>
+     
+      cur_user <- users_map[address];
+      match cur_user with
+      | None =>
+        (* user not exists *)
+        e = { _exception : "user not exists"; address: address};
+        throw e
+       
+      | Some (User staked rewards) =>
+        (* deposit to SSN contract *)
+       
+        tag_deposit = "stake_deposit";
+        ssn_contract_addr <- ssn_contract;
+        transfer_funds tag_deposit pending ssn_contract_addr;
+       
+        (* update user staked amount *)
+        new_staked = builtin add staked pending;
+        new_user = User new_staked rewards;
+        users_map[address] := new_user
+       
+      end
+    end
+  end
+end
+
+(* Transitions *)
+(****************************************)
+(* Admin transitions *)
+(****************************************)
+transition admin_set_admin(new_admin: ByStr20)
+  validate_admin;
+ 
+  old_admin <- admin;
+  admin := new_admin;
+ 
+  e = {_eventname : "admin updated";
+       old_admin : old_admin;
+       new_admin : new_admin};
+  event e
+end
+
+transition admin_set_ssn_contract(new_ssn_contract: ByStr20)
+  validate_admin;
+ 
+  old_ssn_contract <- ssn_contract;
+  ssn_contract := new_ssn_contract;
+ 
+  e = {_eventname : "ssn contract updated";
+       old_ssn_contract : old_ssn_contract;
+       new_ssn_contract : new_ssn_contract};
+  event e
+end
+
+transition admin_set_max_stake(new_max_stake: Uint128)
+  validate_admin;
+ 
+  old_max_stake <- max_stake;
+  max_stake := new_max_stake;
+ 
+  e = {_eventname : "max stake updated";
+       old_max_stake : old_max_stake;
+       new_max_stake : new_max_stake};
+  event e
+end
+
+transition admin_set_reward_percent(new_percent: Uint128)
+  validate_admin;
+ 
+  old_percent <- reward_percent;
+  reward_percent := new_percent;
+ 
+  e = {_eventname : "reward percent updated";
+       old_reward_percent : old_percent;
+       new_reward_percent : new_percent};
+  event e  
+end
+
+transition admin_pause()
+  validate_admin;
+ 
+  paused := true;
+  e = {_eventname : "admin paused"};
+  event e
+end
+
+transition admin_unpause()
+  validate_admin;
+ 
+  paused := false;
+  e = {_eventname : "admin unpaused"};
+  event e
+end
+
+
+transition admin_deposit_to_ssn ()
+  validate_admin;
+  (* deposit pending list to ssn *)
+  map_l <- pending_map;
+  pending_list = builtin to_list map_l;
+  forall pending_list deposit_pending
+end
+
+transition admin_withdraw_from_ssn ()
+  validate_admin
+end
+
+transition admin_withdraw_rewards_from_ssn ()
+  validate_admin
+end
+
+transition admin_deposit_funds ()
+  validate_admin;
+  accept;
+  bal <- _balance;
+  e = {_eventname : "admin deposit funds";
+       amount: _amount; blance: bal};
+  event e
+end
+
+transition admin_drain_balance ()
+  validate_admin;
+
+  balance_l <- _balance;
+  admin_l <- admin;
+  transfer_funds empty_tag balance_l admin_l;
+  e = {_eventname : "admin drain balance";
+       amount: balance_l};
+  event e
+end
+
+(****************************************)
+(* User transitions *)
+(****************************************)
+
+(* user deposit stake *)
+transition deposit_stake()
+  validate_paused;
+  validate_amount _amount;
+  validate_max_stake _amount;
+ 
+  accept;
+ 
+  (* increase total staked *)
+  cur_total <- total_staked;
+  new_total = builtin add cur_total _amount;
+  total_staked := new_total;
+ 
+  (* create user if first deposit *)
+  user_exists <- exists users_map[_sender];
+  match user_exists with
+    | False =>
+      (* create new user *)
+      new_user = User zero zero;
+      users_map[_sender] := new_user
+     
+    | True =>
+      (* user exists *)
+  end;
+   
+  (* add to pending list *)
+  cur_pending <- pending_map[_sender];
+  new_pending = match cur_pending with
+    | None =>
+       _amount
+    | Some (cur_pending) =>
+      builtin add cur_pending _amount
+  end;
+  pending_map[_sender] := new_pending;
+ 
+  e = {
+    _eventname : "stake deposited";
+    result: stakeDeposited;
+    user: _sender;
+    amount: _amount;
+    new_pending: new_pending
+  };
+  event e
+end
+
+
+(* user withdraw all rewards *)
+transition withdraw_rewards ()
+  validate_paused;
+
+  cur_user <- users_map[_sender];
+  match cur_user with
+  | None =>
+    (* user not exists *)
+    e = { _exception : "user not exists"; address: _sender};
+    throw e
+   
+  | Some (User staked rewards) =>
+    has_rewards = builtin lt zero rewards;
+    match has_rewards with
+    | True =>
+      (* set user rewards to 0 and update *)
+      new_user = User staked zero;
+      users_map[_sender] := new_user;
+     
+      (* transfer rewards to _sender *)
+      transfer_funds empty_tag rewards _sender;
+     
+      e = {_eventname : "rewards withdraw success";
+           result: withdrawRewardsSuccess;
+           user: _sender;
+           rewards: rewards};
+      event e
+     
+    | False =>
+      e = {_eventname : "no rewards to withdraw";
+           result: noRewardsToWithdraw;
+           user: _sender;
+           rewards: rewards};
+      event e
+    end  (* match has_rewards with *)
+  end (* match cur_user with *)
+end
+
+(* user withdraw stake *)
+transition withdraw_stake(amount : Uint128)
+  validate_paused;
+  validate_user _sender;
+  (* validate_amount amount; allow 0 amount? *)
+ 
+  (* check pending list first *)
+  cur_pending <- pending_map[_sender];
+  has_pending = match cur_pending with
+    | Some (cur_pending) =>
+      builtin lt zero cur_pending
+    | None =>
+      (*no pending amount, add to waiting list *)
+      false
+  end;
+ 
+  match has_pending with
+  | True =>
+    (* withdraw pending amount immediately *)
+    user_withdraw_pending _sender amount
+  | False =>
+    (* waiting withdraw from SSN contract *)
+    user_withdraw_staked _sender amount
+  end
+end
